@@ -23,7 +23,7 @@ import {
 } from "firebase/firestore";
 import { db } from "@/lib/firebase";
 import { useAuth } from "@/components/providers/AuthProvider";
-import { Task } from "@/types";
+import { Task, ActivityLog } from "@/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
@@ -31,7 +31,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
-import { Send, User, CalendarDays, Flag, Edit2, Check, X, Trash2, Users, Paperclip, Link as LinkIcon, ExternalLink, Plus, MessageSquare, Reply } from "lucide-react";
+import { Send, User, CalendarDays, Flag, Edit2, Check, X, Trash2, Users, Paperclip, Link as LinkIcon, ExternalLink, Plus, MessageSquare, Reply, Clock } from "lucide-react";
 import { format } from "date-fns";
 import { toast } from "sonner";
 import {
@@ -44,9 +44,7 @@ import {
     DialogTrigger,
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { RichTextEditor } from "@/components/ui/RichTextEditor";
 import { logActivity } from "@/lib/logger";
-import { ActivityLog } from "@/types";
 
 interface TaskDetailsSheetProps {
     task: Task | null;
@@ -61,7 +59,7 @@ interface Comment {
     userDisplayName: string;
     userPhoto?: string;
     createdAt: any;
-    parentId?: string | null;  // For threaded replies
+    parentId?: string | null;
 }
 
 interface Member {
@@ -83,10 +81,11 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
     const [activities, setActivities] = useState<ActivityLog[]>([]);
     const [creator, setCreator] = useState<Creator | null>(null);
     const [newComment, setNewComment] = useState("");
-    const [replyTo, setReplyTo] = useState<string | null>(null); // ID of comment being replied to
+    const [replyTo, setReplyTo] = useState<string | null>(null);
     const [isSending, setIsSending] = useState(false);
     const [isEditing, setIsEditing] = useState(false);
     const [isDeleteDialogOpen, setIsDeleteDialogOpen] = useState(false);
+    const [activeTab, setActiveTab] = useState("comments");
 
     // Editing States
     const [editTitle, setEditTitle] = useState("");
@@ -107,7 +106,6 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
             setEditTitle(task.title);
             setEditDescription(task.description || "");
             setEditPriority(task.priority);
-            // Initialize selected assignees from current task
             const currentAssigneeIds = task.assignees?.map(a => a.uid) || [];
             setSelectedAssignees(currentAssigneeIds);
         }
@@ -117,10 +115,9 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
     useEffect(() => {
         if (!task?.id || !isOpen) return;
 
-        // Comments Listener
         const commentsQuery = query(
             collection(db, "tasks", task.id, "comments"),
-            orderBy("createdAt", "asc") // Ascending for conversation flow
+            orderBy("createdAt", "asc")
         );
 
         const unsubComments = onSnapshot(commentsQuery, (snapshot) => {
@@ -131,7 +128,6 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
             setComments(fetchedComments);
         });
 
-        // Activity Listener
         const activityQuery = query(
             collection(db, "tasks", task.id, "activity"),
             orderBy("createdAt", "desc")
@@ -206,7 +202,6 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
 
             await logActivity(task.id, 'comment', `commented on this task`, { uid: user.uid, displayName: user.displayName, photoURL: user.photoURL });
 
-            // Notify assignees
             if (task.assignees && task.assignees.length > 0) {
                 task.assignees.forEach(async (assignee) => {
                     if (assignee.uid !== user.uid) {
@@ -227,30 +222,25 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
                 });
             }
 
-            // Notify Reply Target (if exists and not already notified as assignee)
             if (replyTo) {
                 const parentComment = comments.find(c => c.id === replyTo);
                 if (parentComment && parentComment.userId !== user.uid) {
-                    // Check if we already notified them above (as assignee)
                     const isAssignee = task.assignees?.some(a => a.uid === parentComment.userId);
-                    // If they are NOT an assignee, OR if we want to send a specific "reply" notification distinct from general comment notification
-                    // Let's send a specific Reply notification regardless, or distinct from comment. 
-                    // To avoid spam, maybe we check. But "Replied to you" is more specific than "Commented on task".
-                    // Let's send it to ensure they know it's a direct reply.
-
-                    await addDoc(collection(db, "notifications"), {
-                        recipientId: parentComment.userId,
-                        senderId: user.uid,
-                        senderName: user.displayName,
-                        senderPhoto: user.photoURL,
-                        type: "reply",
-                        taskId: task.id,
-                        taskTitle: task.title,
-                        commentPreview: newComment.substring(0, 50),
-                        isRead: false,
-                        createdAt: serverTimestamp(),
-                        companyId: task.companyId
-                    });
+                    if (!isAssignee) {
+                        await addDoc(collection(db, "notifications"), {
+                            recipientId: parentComment.userId,
+                            senderId: user.uid,
+                            senderName: user.displayName,
+                            senderPhoto: user.photoURL,
+                            type: "reply",
+                            taskId: task.id,
+                            taskTitle: task.title,
+                            commentPreview: newComment.substring(0, 50),
+                            isRead: false,
+                            createdAt: serverTimestamp(),
+                            companyId: task.companyId
+                        });
+                    }
                 }
             }
 
@@ -280,13 +270,9 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
         try {
             const taskRef = doc(db, "tasks", task.id);
 
-            // Reconstruct assignee objects from selected IDs
             const updatedAssignees = selectedAssignees.map(uid => {
-                // Check current task assignees first (optimization)
                 const existing = task.assignees?.find(a => a.uid === uid);
                 if (existing) return existing;
-
-                // Fallback to finding in the fetched members list
                 const member = members.find(m => m.uid === uid);
                 return member ? {
                     uid: member.uid,
@@ -302,7 +288,6 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
                 assignees: updatedAssignees
             });
 
-            // Log specific changes
             if (task.title !== editTitle) {
                 await logActivity(task.id, 'update', `changed title to "${editTitle}"`, { uid: user!.uid, displayName: user!.displayName, photoURL: user!.photoURL });
             }
@@ -330,7 +315,7 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
             await deleteDoc(doc(db, "tasks", task.id));
             toast.success("Task deleted successfully");
             setIsDeleteDialogOpen(false);
-            onClose(); // Close sheet
+            onClose();
         } catch (error) {
             console.error("Delete failed", error);
             toast.error("Failed to delete task");
@@ -350,9 +335,9 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
 
     const formatDate = (date: any) => {
         if (!date) return "No deadline set";
-        if (date.toDate) return format(date.toDate(), "PPP");
+        if (date.toDate) return format(date.toDate(), "MMM d, yyyy");
         try {
-            return format(new Date(date), "PPP");
+            return format(new Date(date), "MMM d, yyyy");
         } catch (e) {
             return "Invalid Date";
         }
@@ -362,50 +347,48 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
 
     return (
         <Sheet open={isOpen} onOpenChange={(open) => { if (!open) setIsEditing(false); if (!open) onClose(); }}>
-            <SheetContent className="w-full sm:w-[540px] flex flex-col h-full sm:max-w-[540px] p-0 gap-0 border-l shadow-2xl">
+            <SheetContent className="w-full sm:w-[540px] flex flex-col h-full sm:max-w-[540px] p-0 gap-0 border-l shadow-2xl bg-white dark:bg-slate-950 transition-all duration-300">
 
-                {/* Header Section */}
-                <div className="p-6 pb-4 border-b bg-slate-50/50 dark:bg-slate-900/50">
-                    {/* Header Actions Row */}
+                {/* --- HEADER (Fixed) --- */}
+                <div className="flex-none p-6 pb-4 border-b bg-white dark:bg-slate-950 z-20">
                     <div className="flex items-center justify-between mb-4">
                         {isEditing ? (
                             <Select value={editPriority} onValueChange={setEditPriority}>
-                                <SelectTrigger className="w-[140px] h-8 text-xs">
+                                <SelectTrigger className="w-[120px] h-7 text-xs font-medium">
                                     <SelectValue placeholder="Priority" />
                                 </SelectTrigger>
                                 <SelectContent>
-                                    <SelectItem value="low">Low</SelectItem>
-                                    <SelectItem value="medium">Medium</SelectItem>
-                                    <SelectItem value="high">High</SelectItem>
+                                    <SelectItem value="low">Low Priority</SelectItem>
+                                    <SelectItem value="medium">Medium Priority</SelectItem>
+                                    <SelectItem value="high">High Priority</SelectItem>
                                 </SelectContent>
                             </Select>
                         ) : (
                             <div className="flex items-center gap-2">
-                                <Badge variant={getPriorityColor(task.priority) as any} className="uppercase text-[10px] tracking-wider font-bold px-2 py-0.5 shadow-sm">
+                                <Badge variant={getPriorityColor(task.priority) as any} className="uppercase text-[10px] tracking-wider font-bold px-2 py-0.5 rounded-sm">
                                     {task.priority} Priority
                                 </Badge>
-                                <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                                <span className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide border px-1.5 py-0.5 rounded-sm">
                                     {task.status.replace("-", " ")}
                                 </span>
                             </div>
                         )}
 
-                        <div className="flex gap-2">
+                        <div className="flex gap-1">
                             {isEditing ? (
                                 <>
                                     <Button size="sm" variant="ghost" onClick={() => setIsEditing(false)} disabled={isSaving}>
                                         <X className="h-4 w-4" />
                                     </Button>
-                                    <Button size="sm" onClick={handleSaveEdit} disabled={isSaving}>
-                                        <Check className="h-4 w-4 mr-1" /> Save
+                                    <Button size="sm" onClick={handleSaveEdit} disabled={isSaving} className="h-7 text-xs">
+                                        <Check className="h-3.5 w-3.5 mr-1" /> Save
                                     </Button>
                                 </>
                             ) : (
-                                <div className="flex gap-1">
-                                    {/* Delete Dialog */}
+                                <>
                                     <Dialog open={isDeleteDialogOpen} onOpenChange={setIsDeleteDialogOpen}>
                                         <DialogTrigger asChild>
-                                            <Button size="icon" variant="ghost" className="h-8 w-8 text-red-500 hover:text-red-700 hover:bg-red-50">
+                                            <Button size="icon" variant="ghost" className="h-7 w-7 text-slate-400 hover:text-red-500">
                                                 <Trash2 className="h-4 w-4" />
                                             </Button>
                                         </DialogTrigger>
@@ -413,42 +396,38 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
                                             <DialogHeader>
                                                 <DialogTitle>Delete Task?</DialogTitle>
                                                 <DialogDescription>
-                                                    This action cannot be undone. This will permanently delete the task "{task.title}".
+                                                    Cannot be undone. "{task.title}" will be permanently deleted.
                                                 </DialogDescription>
                                             </DialogHeader>
                                             <DialogFooter>
-                                                <Button variant="outline" onClick={() => setIsDeleteDialogOpen(false)} disabled={isDeleting}>Cancel</Button>
-                                                <Button variant="destructive" onClick={handleDeleteTask} disabled={isDeleting}>
-                                                    {isDeleting ? "Deleting..." : "Delete"}
-                                                </Button>
+                                                <Button variant="outline" onClick={() => setIsDeleteDialogOpen(false)}>Cancel</Button>
+                                                <Button variant="destructive" onClick={handleDeleteTask} disabled={isDeleting}>Delete</Button>
                                             </DialogFooter>
                                         </DialogContent>
                                     </Dialog>
-
-                                    <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => setIsEditing(true)}>
-                                        <Edit2 className="h-4 w-4 text-slate-500" />
+                                    <Button size="icon" variant="ghost" className="h-7 w-7 text-slate-400 hover:text-slate-900 dark:hover:text-slate-100" onClick={() => setIsEditing(true)}>
+                                        <Edit2 className="h-4 w-4" />
                                     </Button>
-                                </div>
+                                </>
                             )}
                         </div>
                     </div>
 
-                    {/* Title */}
                     {isEditing ? (
                         <Input
                             value={editTitle}
                             onChange={(e) => setEditTitle(e.target.value)}
-                            className="text-xl font-bold mb-2 h-auto py-2"
+                            className="text-lg font-bold h-auto py-2 px-2 -ml-2"
                         />
                     ) : (
-                        <SheetTitle className="text-xl sm:text-2xl font-bold leading-tight text-slate-900 dark:text-slate-100">
+                        <SheetTitle className="text-xl font-bold leading-tight text-slate-900 dark:text-slate-100 break-words">
                             {task.title}
                         </SheetTitle>
                     )}
 
-                    <div className="flex items-center gap-4 mt-3 text-xs text-muted-foreground">
+                    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 mt-3 text-xs text-muted-foreground">
                         <div className="flex items-center gap-1.5">
-                            <CalendarDays className="h-3.5 w-3.5" />
+                            <Clock className="h-3.5 w-3.5" />
                             <span>Created {task.createdAt ? formatDate(task.createdAt) : "Unknown"}</span>
                         </div>
                         {task.deadline && (
@@ -460,338 +439,256 @@ export function TaskDetailsSheet({ task, isOpen, onClose }: TaskDetailsSheetProp
                     </div>
                 </div>
 
-                {/* Scrollable Body */}
-                <div className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-slate-950">
-                    <ScrollArea className="flex-1 p-6">
-                        <div className="flex flex-col gap-8">
+                {/* --- MAIN SCROLLABLE BODY --- */}
+                <div className="flex-1 overflow-y-auto custom-scrollbar">
+                    <div className="p-6 space-y-8 min-h-full">
 
-                            {/* Created By Section */}
-                            {creator && (
-                                <div className="flex flex-col gap-3 p-4 rounded-lg border bg-slate-50 dark:bg-slate-900/30 shadow-sm">
-                                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
-                                        Assigned By
-                                    </h4>
-                                    <div className="flex items-center gap-2 bg-white dark:bg-slate-800 px-3 py-2 rounded-md border shadow-sm w-fit">
-                                        <Avatar className="h-6 w-6 border border-slate-200">
+                        {/* 1. Compact Metadata Section (Assigned Info) */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-6">
+                            {/* Assigned By */}
+                            <div className="space-y-2">
+                                <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Assigned By</h4>
+                                {creator ? (
+                                    <div className="flex items-center gap-2.5 group">
+                                        <Avatar className="h-6 w-6 border border-slate-100 dark:border-slate-800 shadow-sm">
                                             <AvatarImage src={creator.photoURL} />
-                                            <AvatarFallback className="text-[9px] bg-purple-50 text-purple-600">
+                                            <AvatarFallback className="text-[9px] bg-indigo-50 text-indigo-600 font-bold">
                                                 {creator.displayName?.charAt(0)}
                                             </AvatarFallback>
                                         </Avatar>
-                                        <span className="text-xs font-medium">{creator.displayName}</span>
+                                        <span className="text-sm font-medium text-slate-700 dark:text-slate-300 group-hover:text-slate-900 dark:group-hover:text-slate-100 transition-colors">
+                                            {creator.displayName}
+                                        </span>
                                     </div>
-                                </div>
-                            )}
+                                ) : (
+                                    <span className="text-sm text-muted-foreground italic pl-1">Unknown</span>
+                                )}
+                            </div>
 
-                            {/* Assignees Section */}
-                            <div className="flex flex-col gap-3 p-4 rounded-lg border bg-slate-50 dark:bg-slate-900/30 shadow-sm">
-                                <div className="flex justify-between items-center">
-                                    <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider flex items-center gap-2">
-                                        Assigned People
-                                        {isEditing && isMembersLoading && <span className="text-[10px] font-normal animate-pulse">(Loading...)</span>}
-                                    </h4>
-                                </div>
-
+                            {/* Assigned People */}
+                            <div className="space-y-2">
+                                <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest flex items-center gap-2">
+                                    Assigned To
+                                    {isEditing && isMembersLoading && <span className="text-[8px] font-normal animate-pulse text-blue-500">Loading...</span>}
+                                </h4>
                                 {isEditing ? (
-                                    <div className="space-y-3">
+                                    <div className="space-y-2">
                                         <Select onValueChange={handleAssigneeSelect} disabled={isMembersLoading}>
-                                            <SelectTrigger className="h-8 text-xs bg-white">
-                                                <SelectValue placeholder="Add assignee..." />
+                                            <SelectTrigger className="h-7 text-xs w-full bg-slate-50 dark:bg-slate-900">
+                                                <SelectValue placeholder="Add person..." />
                                             </SelectTrigger>
                                             <SelectContent>
                                                 {members.map((m) => (
                                                     <SelectItem key={m.uid} value={m.uid} disabled={selectedAssignees.includes(m.uid)}>
                                                         <div className="flex items-center gap-2">
-                                                            <Avatar className="h-4 w-4">
-                                                                <AvatarImage src={m.photoURL} />
-                                                                <AvatarFallback className="text-[6px]">{m.displayName?.[0]}</AvatarFallback>
-                                                            </Avatar>
+                                                            <Avatar className="h-4 w-4"><AvatarImage src={m.photoURL} /><AvatarFallback>{m.displayName[0]}</AvatarFallback></Avatar>
                                                             {m.displayName}
                                                         </div>
                                                     </SelectItem>
                                                 ))}
                                             </SelectContent>
                                         </Select>
-
-                                        <div className="flex flex-wrap gap-2">
+                                        <div className="flex flex-wrap gap-1.5">
                                             {selectedAssignees.map(uid => {
-                                                // Try to find details in members array first, then fallback to current task info if not yet fetched
                                                 const memberInfo = members.find(m => m.uid === uid) || task.assignees?.find(a => a.uid === uid);
                                                 if (!memberInfo) return null;
-
                                                 return (
-                                                    <Badge key={uid} variant="secondary" className="pl-1 pr-2 py-1 flex items-center gap-1 bg-white border">
-                                                        <Avatar className="h-4 w-4">
-                                                            <AvatarImage src={memberInfo.photoURL} />
-                                                            <AvatarFallback className="text-[6px]">{memberInfo.displayName?.[0]}</AvatarFallback>
-                                                        </Avatar>
-                                                        <span className="text-xs">{memberInfo.displayName}</span>
-                                                        <button
-                                                            type="button"
-                                                            onClick={() => removeAssignee(uid)}
-                                                            className="ml-1 hover:text-red-500"
-                                                        >
-                                                            <X className="h-3 w-3" />
-                                                        </button>
+                                                    <Badge key={uid} variant="secondary" className="pl-1 pr-1.5 py-0.5 flex items-center gap-1 bg-white dark:bg-slate-800 border shadow-sm font-normal">
+                                                        <Avatar className="h-3.5 w-3.5"><AvatarImage src={memberInfo.photoURL} /><AvatarFallback className="text-[6px]">{memberInfo.displayName?.[0]}</AvatarFallback></Avatar>
+                                                        <span className="text-[10px] truncate max-w-[80px]">{memberInfo.displayName}</span>
+                                                        <button type="button" onClick={() => removeAssignee(uid)} className="hover:text-red-500"><X className="h-2.5 w-2.5" /></button>
                                                     </Badge>
                                                 )
                                             })}
                                         </div>
                                     </div>
                                 ) : (
-                                    <div className="flex flex-wrap gap-3">
+                                    <div className="flex flex-wrap gap-2">
                                         {task.assignees && task.assignees.length > 0 ? (
                                             task.assignees.map((assignee) => (
-                                                <div key={assignee.uid} className="flex items-center gap-2 bg-white dark:bg-slate-800 px-2 py-1.5 rounded-md border shadow-sm">
-                                                    <Avatar className="h-6 w-6 border border-slate-200">
+                                                <div key={assignee.uid} className="flex items-center gap-2 bg-slate-50 dark:bg-slate-900/50 px-2 py-1 rounded-md border border-slate-100 dark:border-slate-800">
+                                                    <Avatar className="h-5 w-5">
                                                         <AvatarImage src={assignee.photoURL} />
-                                                        <AvatarFallback className="text-[9px] bg-blue-50 text-blue-600">
+                                                        <AvatarFallback className="text-[8px] bg-blue-50 text-blue-600 font-bold">
                                                             {assignee.displayName?.charAt(0)}
                                                         </AvatarFallback>
                                                     </Avatar>
-                                                    <span className="text-xs font-medium">{assignee.displayName}</span>
+                                                    <span className="text-xs font-medium text-slate-700 dark:text-slate-300">{assignee.displayName}</span>
                                                 </div>
                                             ))
                                         ) : (
-                                            <div className="flex items-center gap-2 text-slate-500">
-                                                <div className="h-8 w-8 rounded-full bg-slate-200 dark:bg-slate-800 flex items-center justify-center border-2 border-dashed border-slate-300 dark:border-slate-700">
-                                                    <User className="h-4 w-4" />
-                                                </div>
-                                                <span className="text-sm italic">No one assigned</span>
-                                            </div>
+                                            <span className="text-sm italic text-muted-foreground pl-1">Unassigned</span>
                                         )}
                                     </div>
                                 )}
                             </div>
-
-                            {/* Description Section */}
-                            <div className="space-y-2">
-                                <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                                    Description
-                                </h4>
-                                {isEditing ? (
-                                    <Textarea
-                                        value={editDescription}
-                                        onChange={(e) => setEditDescription(e.target.value)}
-                                        className="min-h-[150px] text-sm bg-white"
-                                    />
-                                ) : (
-                                    <div
-                                        className="text-sm text-slate-600 dark:text-slate-400 leading-relaxed prose prose-sm dark:prose-invert max-w-none bg-slate-50 dark:bg-slate-900/50 p-4 rounded-md border border-slate-100 dark:border-slate-800"
-                                        dangerouslySetInnerHTML={{ __html: task.description || '<span class="italic text-muted-foreground">No additional description provided.</span>' }}
-                                    />
-                                )}
-                            </div>
-
-
-                            {/* Available Attachments Section */}
-                            {task.attachments && task.attachments.length > 0 && (
-                                <div className="space-y-2">
-                                    <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                                        Attachments
-                                    </h4>
-                                    <div className="grid grid-cols-1 gap-2">
-                                        {task.attachments.map((att) => (
-                                            <a
-                                                key={att.id}
-                                                href={att.url}
-                                                target="_blank"
-                                                rel="noopener noreferrer"
-                                                className="flex items-center p-2 rounded-md border bg-slate-50 dark:bg-slate-900/50 hover:bg-slate-100 dark:hover:bg-slate-900 transition-colors group"
-                                            >
-                                                <div className="h-8 w-8 rounded bg-white dark:bg-slate-800 flex items-center justify-center border shadow-sm mr-3">
-                                                    {att.type === 'file' ?
-                                                        <Paperclip className="h-4 w-4 text-blue-500" /> :
-                                                        <LinkIcon className="h-4 w-4 text-green-500" />
-                                                    }
-                                                </div>
-                                                <div className="flex-1 min-w-0">
-                                                    <p className="text-sm font-medium truncate text-slate-700 dark:text-slate-300">{att.name}</p>
-                                                    <p className="text-[10px] text-muted-foreground">
-                                                        {att.type === 'file' ? "Uploaded File" : "External Link"}
-                                                    </p>
-                                                </div>
-                                                <ExternalLink className="h-3 w-3 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" />
-                                            </a>
-                                        ))}
-                                    </div>
-                                </div>
-                            )}
-
-
                         </div>
-                    </ScrollArea>
 
-                    {/* Tabs Section: Activity & Comments */}
-                    <div className="flex-1 flex flex-col min-h-0">
-                        <Tabs defaultValue="comments" className="flex-1 flex flex-col min-h-0">
-                            <div className="px-6 pt-4 pb-2">
-                                <TabsList className="grid w-full grid-cols-2 bg-slate-100 dark:bg-slate-800/50 p-1 rounded-lg shadow-inner">
-                                    <TabsTrigger
-                                        value="comments"
-                                        className="rounded-md py-2 text-sm font-medium transition-all data-[state=active]:bg-white dark:data-[state=active]:bg-slate-700 data-[state=active]:text-primary data-[state=active]:shadow-sm"
-                                    >
-                                        Comments ({comments.length})
-                                    </TabsTrigger>
-                                    <TabsTrigger
-                                        value="activity"
-                                        className="rounded-md py-2 text-sm font-medium transition-all data-[state=active]:bg-white dark:data-[state=active]:bg-slate-700 data-[state=active]:text-primary data-[state=active]:shadow-sm"
-                                    >
-                                        History ({activities.length})
-                                    </TabsTrigger>
-                                </TabsList>
+                        {/* 2. Description Section */}
+                        <div className="space-y-2.5">
+                            <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Description</h4>
+                            {isEditing ? (
+                                <Textarea
+                                    value={editDescription}
+                                    onChange={(e) => setEditDescription(e.target.value)}
+                                    className="min-h-[120px] text-sm leading-relaxed p-3 bg-slate-50 dark:bg-slate-900"
+                                    placeholder="Add a more detailed description..."
+                                />
+                            ) : (
+                                <div
+                                    className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed prose prose-sm dark:prose-invert max-w-none whitespace-pre-wrap"
+                                    dangerouslySetInnerHTML={{ __html: task.description || '<span class="italic text-muted-foreground opacity-70">No description provided.</span>' }}
+                                />
+                            )}
+                        </div>
+
+                        {/* 3. Attachments Section */}
+                        {task.attachments && task.attachments.length > 0 && (
+                            <div className="space-y-2.5">
+                                <h4 className="text-[10px] font-bold text-muted-foreground uppercase tracking-widest">Attachments ({task.attachments.length})</h4>
+                                <div className="grid grid-cols-1 gap-2">
+                                    {task.attachments.map((att) => (
+                                        <a
+                                            key={att.id}
+                                            href={att.url}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            className="flex items-center p-2.5 rounded-lg border bg-white dark:bg-slate-900 shadow-sm hover:shadow-md hover:border-blue-200 dark:hover:border-blue-900 transition-all group"
+                                        >
+                                            <div className="h-8 w-8 rounded bg-slate-50 dark:bg-slate-800 flex items-center justify-center border mr-3">
+                                                {att.type === 'file' ? <Paperclip className="h-4 w-4 text-blue-500" /> : <LinkIcon className="h-4 w-4 text-green-500" />}
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <p className="text-sm font-medium truncate text-slate-700 dark:text-slate-200 group-hover:text-blue-600 transition-colors">{att.name}</p>
+                                                <p className="text-[10px] text-muted-foreground">{att.type === 'file' ? "Uploaded File" : "External Link"}</p>
+                                            </div>
+                                            <ExternalLink className="h-3 w-3 text-slate-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                        </a>
+                                    ))}
+                                </div>
                             </div>
+                        )}
 
-                            <TabsContent value="comments" className="flex-1 flex flex-col min-h-0 p-0 m-0 border-none data-[state=inactive]:hidden overflow-hidden">
-                                <div className="flex-1 overflow-y-auto p-6">
+                        {/* 4. Tabs Section (Comments / History) */}
+                        <div className="pt-2">
+                            <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
+                                <TabsList className="grid w-full grid-cols-2 h-9 bg-slate-100 dark:bg-slate-800 p-1 rounded-lg">
+                                    <TabsTrigger value="comments" className="text-xs font-medium">Comments ({comments.length})</TabsTrigger>
+                                    <TabsTrigger value="activity" className="text-xs font-medium">History ({activities.length})</TabsTrigger>
+                                </TabsList>
+
+                                {/* Comments Tab Content */}
+                                <TabsContent value="comments" className="mt-4 space-y-4 data-[state=inactive]:hidden focus:outline-none">
                                     {comments.length === 0 ? (
-                                        <div className="text-center py-8">
-                                            <p className="text-sm text-muted-foreground">Type a message to start the discussion.</p>
+                                        <div className="text-center py-10 opacity-50">
+                                            <MessageSquare className="h-8 w-8 mx-auto mb-2 text-slate-300" />
+                                            <p className="text-sm text-slate-500">No comments yet</p>
                                         </div>
                                     ) : (
                                         <div className="space-y-6">
-                                            {comments
-                                                .filter(c => !c.parentId) // Top level
-                                                .map((comment) => (
-                                                    <div key={comment.id} className="space-y-4">
-                                                        {/* Parent Comment */}
-                                                        <div className="flex gap-3 group relative">
-                                                            <Avatar className="h-8 w-8 border-2 border-white dark:border-slate-950 z-10 mt-1">
-                                                                <AvatarImage src={comment.userPhoto} />
-                                                                <AvatarFallback className="text-xs">{comment.userDisplayName[0]}</AvatarFallback>
+                                            {comments.filter(c => !c.parentId).map((comment) => (
+                                                <div key={comment.id} className="space-y-3">
+                                                    {/* Parent Comment */}
+                                                    <div className="flex gap-3 relative group">
+                                                        <Avatar className="h-7 w-7 mt-0.5 border border-slate-100 dark:border-slate-800">
+                                                            <AvatarImage src={comment.userPhoto} />
+                                                            <AvatarFallback className="text-[10px]">{comment.userDisplayName[0]}</AvatarFallback>
+                                                        </Avatar>
+                                                        <div className="flex-1 space-y-1">
+                                                            <div className="flex items-baseline justify-between">
+                                                                <span className="text-sm font-semibold text-slate-900 dark:text-slate-100">{comment.userDisplayName}</span>
+                                                                <span className="text-[10px] text-muted-foreground">{comment.createdAt?.toDate ? format(comment.createdAt.toDate(), "MMM d, h:mm a") : "Just now"}</span>
+                                                            </div>
+                                                            <div className="text-sm text-slate-600 dark:text-slate-300 leading-relaxed whitespace-pre-wrap">
+                                                                {comment.text}
+                                                            </div>
+                                                            <button onClick={() => setReplyTo(comment.id)} className="flex items-center gap-1 text-[11px] font-medium text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors mt-1">
+                                                                <Reply className="h-3 w-3" /> Reply
+                                                            </button>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Replies */}
+                                                    {comments.filter(r => r.parentId === comment.id).map(reply => (
+                                                        <div key={reply.id} className="flex gap-3 ml-8 relative pl-3 border-l-2 border-slate-100 dark:border-slate-800">
+                                                            <Avatar className="h-6 w-6 mt-0.5">
+                                                                <AvatarImage src={reply.userPhoto} />
+                                                                <AvatarFallback className="text-[9px]">{reply.userDisplayName[0]}</AvatarFallback>
                                                             </Avatar>
                                                             <div className="flex-1 space-y-1">
-                                                                <div className="flex items-center justify-between">
-                                                                    <span className="text-sm font-semibold text-slate-900 dark:text-slate-200">
-                                                                        {comment.userDisplayName}
-                                                                    </span>
-                                                                    <span className="text-[10px] text-muted-foreground">
-                                                                        {comment.createdAt?.toDate ? format(comment.createdAt.toDate(), "MMM d, h:mm a") : "Just now"}
-                                                                    </span>
+                                                                <div className="flex items-baseline justify-between">
+                                                                    <span className="text-xs font-semibold text-slate-900 dark:text-slate-100">{reply.userDisplayName}</span>
+                                                                    <span className="text-[10px] text-muted-foreground">{reply.createdAt?.toDate ? format(reply.createdAt.toDate(), "MMM d, h:mm a") : "Just now"}</span>
                                                                 </div>
-                                                                <div className="text-sm text-slate-600 dark:text-slate-400 bg-slate-50 dark:bg-slate-900/50 p-3 rounded-br-lg rounded-bl-lg rounded-tr-lg whitespace-pre-wrap">
-                                                                    {comment.text.replace(/<[^>]*>/g, '')}
+                                                                <div className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed whitespace-pre-wrap">
+                                                                    {reply.text}
                                                                 </div>
-                                                                <Button
-                                                                    variant="ghost"
-                                                                    size="sm"
-                                                                    onClick={() => setReplyTo(comment.id)}
-                                                                    className="h-6 px-2 text-[10px] text-slate-500 hover:text-blue-600 gap-1"
-                                                                >
-                                                                    <Reply className="h-3 w-3" /> Reply
-                                                                </Button>
                                                             </div>
                                                         </div>
-
-                                                        {/* Replies */}
-                                                        {comments.filter(r => r.parentId === comment.id).map(reply => (
-                                                            <div key={reply.id} className="flex gap-3 ml-11 relative group mt-3">
-                                                                {/* Connecting Line */}
-                                                                <div className="absolute -left-6 top-[-10px] w-6 h-6 border-l-2 border-b-2 border-slate-200 dark:border-slate-800 rounded-bl-md" />
-
-                                                                <Avatar className="h-6 w-6 mt-1">
-                                                                    <AvatarImage src={reply.userPhoto} />
-                                                                    <AvatarFallback className="text-[10px]">{reply.userDisplayName[0]}</AvatarFallback>
-                                                                </Avatar>
-                                                                <div className="flex-1 space-y-1">
-                                                                    <div className="flex items-center justify-between">
-                                                                        <span className="text-xs font-semibold text-slate-900 dark:text-slate-200">
-                                                                            {reply.userDisplayName}
-                                                                        </span>
-                                                                        <span className="text-[10px] text-muted-foreground">
-                                                                            {reply.createdAt?.toDate ? format(reply.createdAt.toDate(), "MMM d, h:mm a") : "Just now"}
-                                                                        </span>
-                                                                    </div>
-                                                                    <div className="text-xs text-slate-600 dark:text-slate-400 bg-slate-50/80 dark:bg-slate-900/40 p-2.5 rounded-lg whitespace-pre-wrap">
-                                                                        {reply.text.replace(/<[^>]*>/g, '')}
-                                                                    </div>
-                                                                </div>
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                ))}
+                                                    ))}
+                                                </div>
+                                            ))}
                                         </div>
                                     )}
-                                </div>
+                                </TabsContent>
 
-                                {/* Rich Text Editor Input (Now Textarea) */}
-                                <div className="p-4 border-t bg-white dark:bg-slate-950 flex-none z-10">
-                                    {replyTo && (
-                                        <div className="flex justify-between items-center mb-2 px-2 py-1 bg-blue-50 dark:bg-blue-900/20 rounded text-xs text-blue-600">
-                                            <span>Replying to comment...</span>
-                                            <button onClick={() => setReplyTo(null)} className="hover:underline">Cancel</button>
-                                        </div>
-                                    )}
-                                    <div className="relative flex items-end gap-2 bg-slate-100 dark:bg-slate-900 p-1.5 rounded-3xl border border-transparent focus-within:border-slate-300 dark:focus-within:border-slate-700 transition-all shadow-sm">
-                                        <Button
-                                            variant="ghost"
-                                            size="icon"
-                                            className="h-9 w-9 rounded-full text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 hover:bg-slate-200/50 dark:hover:bg-slate-800 mb-0.5 flex-shrink-0"
-                                        >
-                                            <Plus className="h-5 w-5" />
-                                        </Button>
-
-                                        <Textarea
-                                            value={newComment}
-                                            onChange={(e) => setNewComment(e.target.value)}
-                                            onKeyDown={(e) => {
-                                                if (e.key === 'Enter' && !e.shiftKey) {
-                                                    e.preventDefault();
-                                                    if (!isSending && newComment.trim() && newComment !== '<p></p>') {
-                                                        handleSendComment();
-                                                    }
-                                                }
-                                            }}
-                                            placeholder={replyTo ? "Write a reply..." : "Add a comment..."}
-                                            className="flex-1 min-h-[44px] max-h-[150px] bg-transparent border-none shadow-none focus-visible:ring-0 resize-none py-3 px-2 text-sm leading-relaxed"
-                                        />
-
-                                        <Button
-                                            size="icon"
-                                            onClick={handleSendComment}
-                                            disabled={isSending || !newComment.trim() || newComment === '<p></p>'}
-                                            className={`h-9 w-9 rounded-full mb-0.5 flex-shrink-0 transition-all ${!newComment.trim() || newComment === '<p></p>'
-                                                ? 'bg-slate-200 dark:bg-slate-800 text-slate-400 dark:text-slate-600'
-                                                : 'bg-slate-900 dark:bg-slate-100 text-white dark:text-slate-900 hover:bg-slate-800 dark:hover:bg-slate-200'
-                                                }`}
-                                        >
-                                            {isSending ? <span className="animate-spin text-xs">↻</span> : <Send className="h-4 w-4 ml-0.5" />}
-                                        </Button>
-                                    </div>
-                                </div>
-                            </TabsContent>
-
-                            <TabsContent value="activity" className="flex-1 flex flex-col min-h-0 p-0 m-0 border-none data-[state=inactive]:hidden">
-                                <ScrollArea className="flex-1 p-6">
-                                    <div className="space-y-6 relative ml-2">
-                                        <div className="absolute left-[11px] top-2 bottom-2 w-[2px] bg-slate-100 dark:bg-slate-800" />
-                                        {activities.map((log) => (
-                                            <div key={log.id} className="relative flex gap-4 items-start">
-                                                <div className="relative z-10 h-6 w-6 rounded-full bg-slate-100 dark:bg-slate-800 border-2 border-white dark:border-slate-950 flex items-center justify-center text-[10px]">
-                                                    {log.action === 'create' && <Plus className="h-3 w-3 text-green-500" />}
-                                                    {log.action === 'status_change' && <Check className="h-3 w-3 text-orange-500" />}
-                                                    {log.action === 'comment' && <MessageSquare className="h-3 w-3 text-blue-500" />}
-                                                    {log.action === 'upload' && <Paperclip className="h-3 w-3 text-purple-500" />}
-                                                    {/* Fallback */}
-                                                    {!['create', 'status_change', 'comment', 'upload'].includes(log.action) && <User className="h-3 w-3 text-slate-500" />}
-                                                </div>
-                                                <div className="flex-1 pt-0.5">
-                                                    <p className="text-sm text-slate-900 dark:text-slate-200">
-                                                        <span className="font-semibold">{log.userDisplayName}</span> <span className="text-muted-foreground">{log.details}</span>
-                                                    </p>
-                                                    <p className="text-[10px] text-muted-foreground mt-1">
-                                                        {log.createdAt?.toDate ? format(log.createdAt.toDate(), "MMM d, h:mm a") : "Just now"}
-                                                    </p>
-                                                </div>
+                                {/* Activity Tab Content */}
+                                <TabsContent value="activity" className="mt-4 space-y-0 relative pl-4 border-l border-slate-200 dark:border-slate-800 ml-2 data-[state=inactive]:hidden focus:outline-none">
+                                    {activities.map((log, idx) => (
+                                        <div key={log.id} className="relative pb-6 last:pb-0">
+                                            <div className={`absolute -left-[21px] top-1 h-3 w-3 rounded-full border-2 border-white dark:border-slate-950 flex items-center justify-center ${log.action === 'create' ? 'bg-green-100 text-green-600' :
+                                                log.action === 'status_change' ? 'bg-orange-100 text-orange-600' :
+                                                    log.action === 'comment' ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-600'
+                                                }`}>
                                             </div>
-                                        ))}
-                                    </div>
-                                </ScrollArea>
-                            </TabsContent>
-                        </Tabs>
+                                            <div className="flex flex-col gap-0.5">
+                                                <p className="text-xs text-slate-700 dark:text-slate-300">
+                                                    <span className="font-semibold text-slate-900 dark:text-slate-100">{log.userDisplayName}</span> {log.details}
+                                                </p>
+                                                <p className="text-[10px] text-muted-foreground">{log.createdAt?.toDate ? format(log.createdAt.toDate(), "MMM d, yyyy • h:mm a") : "Unknown date"}</p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </TabsContent>
+                            </Tabs>
+                        </div>
                     </div>
                 </div>
+
+                {/* --- FOOTER (Comment Input) --- */}
+                {activeTab === 'comments' && (
+                    <div className="flex-none p-4 bg-white dark:bg-slate-950 border-t z-20">
+                        {replyTo && (
+                            <div className="flex justify-between items-center mb-2 px-3 py-1.5 bg-slate-50 dark:bg-slate-900 rounded-md border border-slate-100 dark:border-slate-800 text-xs shadow-sm animated-in slide-in-from-bottom-1">
+                                <span className="text-blue-600 font-medium flex items-center gap-1"><Reply className="h-3 w-3" /> Replying to comment...</span>
+                                <button onClick={() => setReplyTo(null)} className="text-slate-400 hover:text-slate-700"><X className="h-3 w-3" /></button>
+                            </div>
+                        )}
+                        <div className="flex gap-2 items-end">
+                            <Textarea
+                                value={newComment}
+                                onChange={(e) => setNewComment(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter' && !e.shiftKey) {
+                                        e.preventDefault();
+                                        if (!isSending && newComment.trim()) handleSendComment();
+                                    }
+                                }}
+                                placeholder="Write a comment..."
+                                className="min-h-[44px] max-h-[120px] py-3 text-sm resize-none bg-slate-50 dark:bg-slate-900 border-slate-200 dark:border-slate-800 focus-visible:ring-1 focus-visible:ring-offset-0"
+                            />
+                            <Button
+                                onClick={handleSendComment}
+                                disabled={isSending || !newComment.trim()}
+                                size="icon"
+                                className="h-[44px] w-[44px] flex-shrink-0"
+                            >
+                                {isSending ? <span className="animate-spin">↻</span> : <Send className="h-4 w-4" />}
+                            </Button>
+                        </div>
+                    </div>
+                )}
             </SheetContent>
-        </Sheet         >
+        </Sheet>
     );
 }
